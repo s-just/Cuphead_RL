@@ -13,6 +13,12 @@ import pyautogui
 from datetime import datetime
 import pygetwindow as gw
 
+
+###
+### Need to add way to used capture screen rather just top left of monitor so there is no discrepency inpositions when running the model from a different screen position
+### Need to implement facing direction rather than just bullets between
+###
+
 def capture_screen(window_title):
     window = gw.getWindowsWithTitle(window_title)[0]
     screenshot = pyautogui.screenshot(region=(window.left, window.top, window.width, window.height))
