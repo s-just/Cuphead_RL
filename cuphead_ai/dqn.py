@@ -97,7 +97,10 @@ class Environment:
         elif action == 1:  # Move Right
             self.movement.move_right()
         elif action == 2:  # Duck
-            self.movement.duck()
+            if (self.player_position is None) or (np.array_equal(self.player_position, np.array([-1, -1, -1, -1, -1]))):
+                self.movement.clear_movement()
+            else:
+                self.movement.duck()
         
         reward = self.reward()
         new_state = self.get_state()
@@ -149,11 +152,10 @@ class Environment:
 
     def check_terminal_state(self):
         if np.array_equal(self.player_position, np.array([-1, -1, -1, -1, -1])):
-            print('returning True for done')
-
             screen = capture_screen('Cuphead')
             # If the player is dead, break the loop
             if is_player_dead(screen):
+                self.movement.clear_movement()
                 print("FOUND RETRY FOUND RETRY.")
                 return True
             else:
@@ -161,9 +163,11 @@ class Environment:
                 return False
             
         elif (self.player_position is None):
+            self.movement.clear_movement()
             screen = capture_screen('Cuphead')
             # If the player is dead, break the loop
             if is_player_dead(screen):
+                self.movement.clear_movement()
                 print("FOUND RETRY FOUND RETRY.")
                 return True
             else:
@@ -175,7 +179,7 @@ class Environment:
 
     def reward(self):
         if self.is_overlapping([self.player_position, self.boss_position]):
-            return -5
+            return -15
         else:
             return 1
 
@@ -184,7 +188,7 @@ class Environment:
         self.player_position = None
         self.boss_position = None
         self.alive = True
-        time.sleep(3)
+        time.sleep(1.5)
         print('Resetting environment... PRESSING RETRY')
         self.press_retry()
         time.sleep(1.5)
@@ -209,6 +213,11 @@ class DQN:
         # ????
         self.target_update_counter = 0
 
+    def load_weights(self, weights_path):
+        self.model.load_weights(weights_path)
+        self.target_model.load_weights(weights_path)
+        print(f"Weights loaded from {weights_path}")
+    
     def create_model(self, input_shape, action_shape):
         model = Sequential()
 
@@ -343,6 +352,10 @@ env = Environment(objrecognition, movement_controller)
 print('building DQN Agent')
 agent = DQN()
 
+#saved_weights_path = ""
+#agent.load_weights(saved_weights_path)
+
+
 print('starting episodes')
 for episode in range(EPISODES):
     movement_controller.clear_movement()
@@ -361,8 +374,14 @@ for episode in range(EPISODES):
         else:
             action = np.argmax(agent.get_qs(current_state, step))
 
+        if (env.player_position is None):
+            movement_controller.clear_movement().clear_movement()
+
         new_state, reward, done = env.step(action)
 
+        if (env.player_position is None):
+            movement_controller.clear_movement().clear_movement()
+        
         episode_reward += reward
 
         agent.update_replay_memory((current_state, action, reward, new_state, done))
