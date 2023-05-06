@@ -20,15 +20,15 @@ def capture_screen(window_title):
     screen = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
     return screen
 
-
 def is_player_dead(screen, threshold=0.8):
-    retry_button = cv2.imread('retry_button.png', cv2.IMREAD_GRAYSCALE)
-    screen_gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+    retry_button = cv2.imread('retry_button.png')  # Removed cv2.IMREAD_GRAYSCALE
+    # Removed screen_gray conversion since we will work with color
     
-    result = cv2.matchTemplate(screen_gray, retry_button, cv2.TM_CCOEFF_NORMED)
+    result = cv2.matchTemplate(screen, retry_button, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, _ = cv2.minMaxLoc(result)
     
     return max_val > threshold
+
 
 class ObjectRecognition():
     def __init__(self, model, bounding_box, show_results, conf_threshold):
@@ -41,14 +41,16 @@ class ObjectRecognition():
     def get_screen_data(self):
         last_time = time.time()
         self.curr_screen = np.array(ImageGrab.grab(bbox=self.bounding_box))
-        results = self.model.predict(cv2.cvtColor(self.curr_screen, cv2.COLOR_BGR2RGB), conf=self.conf_threshold,
-                                show=self.show_results, device=0)
-        print('Time taken for OR model to get data from screen: ', str(time.time() - last_time))
+        #results = self.model.predict(cv2.cvtColor(self.curr_screen, cv2.COLOR_BGR2RGB), conf=self.conf_threshold,
+        #                        show=self.show_results, device=0)
+        results = self.model.predict(cv2.cvtColor(self.curr_screen, cv2.COLOR_BGR2RGB), conf=self.conf_threshold,device=0)
+        #print('Time taken for OR model to get data from screen: ', str(time.time() - last_time))
+        #print(results[0].boxes.boxes)
         return results[0].boxes.boxes
 
 
 REPLAY_MEMORY_SIZE = 50_000
-MIN_REPLAY_MEMORY_SIZE = 1_000
+MIN_REPLAY_MEMORY_SIZE = 500
 MINIBATCH_SIZE = 64
 DISCOUNT = 0.99
 TARGET_UPDATE_FREQ = 5
@@ -61,7 +63,9 @@ class Environment:
         self.movement = movement
         self.player_label = 1
         self.boss_label = 2
+        self.missile_label = 0
         self.ACTION_SPACE_SIZE = 3
+        self.current_missiles = []
         
     def is_overlapping(self, objects):
         found_overlaps = []
@@ -110,28 +114,31 @@ class Environment:
 
     def get_state(self):
         self.capture_state()
-        print("player pos:", self.player_position)
-        print("boss pos:", self.boss_position)
+        #print("player pos:", self.player_position)
+        #print("boss pos:", self.boss_position)
+        #print("missiles list:", self.current_missiles)
         
         if self.player_position is None:
             self.player_position = np.array([-1, -1, -1, -1, -1])
             #self.player_position = None
-            print('Could not find player.')
+            #print('Could not find player.')
         if self.boss_position is None:
             #self.boss_position = None
-            print('Could not find player.')
+            #print('Could not find player.')
             self.boss_position = np.array([-1, -1, -1, -1, -1])
             
         return np.concatenate([self.player_position, self.boss_position])
     
     def capture_state(self):
         obj_recognition_output = self.objrecognition.get_screen_data()
-        print("OR output:",obj_recognition_output)
+        #print("OR output:",obj_recognition_output)
 
         # Create dictionaries for keeping track of highest accuracy player / boss. initializing to -1 for sorting purposes.
         highest_accuracy = {self.player_label: -1, self.boss_label: -1}
         highest_accuracy_objdata = {self.player_label: None, self.boss_label: None}
 
+        missiles = []
+        
         # Loop through objects detected by the object recognition model
         for obj in obj_recognition_output:
             x, y, w, h, accuracy, label = obj.tolist()
@@ -145,11 +152,39 @@ class Environment:
                 if highest_accuracy[label] < accuracy:
                     highest_accuracy[label] = accuracy
                     highest_accuracy_objdata[label] = np.array([x, y, w, h, accuracy])
+            elif label == self.missile_label:
+                if (accuracy > 0.5):
+                    missiles.append(np.array([x, y, w, h, accuracy]))
+        self.current_missiles = missiles
                     
          # Update the player and boss positions with the highest accuracy objects
         self.player_position = highest_accuracy_objdata[self.player_label]
         self.boss_position = highest_accuracy_objdata[self.boss_label]
 
+
+    def is_missile_between(self, player, boss, missiles):
+        for missile in missiles:
+            if missile is None:
+                return False
+
+            # Check if the missile's x coordinates are between the player's and boss's x coordinates
+            if min(player[0], boss[0]) < missile[0] < max(player[2], boss[2]) and \
+               min(player[1], boss[1]) < missile[1] < max(player[3], boss[3]):
+                return True
+
+        return False
+
+        
+    def check_for_boss_dmg(self):
+        for missile in self.current_missiles:
+            if self.is_missile_between(self.player_position, self.boss_position, self.current_missiles):
+                #print('SHOOTING BOSS')
+                #print('SHOOTING BOSS')
+                #print('SHOOTING BOSS')
+                return True
+        #print('not shooting boss')
+        return False
+    
     def check_terminal_state(self):
         if np.array_equal(self.player_position, np.array([-1, -1, -1, -1, -1])):
             self.movement.clear_movement()
@@ -159,7 +194,7 @@ class Environment:
                 print("FOUND RETRY FOUND RETRY.")
                 return True
             else:
-                print("DID NOT FIND RETRY")
+                #print("DID NOT FIND RETRY")
                 return False
             
         elif (self.player_position is None):
@@ -170,31 +205,55 @@ class Environment:
                 print("FOUND RETRY FOUND RETRY.")
                 return True
             else:
-                print("DID NOT FIND RETRY")
+                #print("DID NOT FIND RETRY")
                 return False
         else:
-            print('returning False for done, player is on screen')
+            #print('returning False for done, player is on screen')
             return False
 
     def reward(self):
-        if self.is_overlapping([self.player_position, self.boss_position]):
-            return -15
-        else:
-            return 1
+        damage_boss_bonus = 0
 
-    def reset(self):
+        if (self.check_for_boss_dmg()):
+            damage_boss_bonus += 5
+        else:
+            damage_boss_bonus -= 2
+            
+        if self.is_overlapping([self.player_position, self.boss_position]):
+            return -25
+        else:
+            return 1 + damage_boss_bonus
+
+    def reset(self, ignore_check):
         self.movement.clear_movement()
         self.player_position = None
         self.boss_position = None
         self.alive = True
         time.sleep(1.5)
         print('Resetting environment... PRESSING RETRY')
-        self.press_retry()
+        self.press_retry(ignore_check)
         time.sleep(1.5)
         return self.get_state()
 
-    def press_retry(self):
-        self.movement.retry_level()
+    def press_retry(self, ignore_check):
+        self.movement.clear_movement()
+        self.movement.clear_movement()
+        self.movement.clear_movement()
+        if ignore_check:
+            print('ignoring retry check')
+            self.movement.retry_level()
+        else:
+            while True:
+                screen = capture_screen('Cuphead')
+                if is_player_dead(screen, threshold=0.95):
+                    print('found highlighted retry')
+                    self.movement.retry_level()
+                    break
+                else:
+                    print('menu bugged, finding retry')
+                    pyautogui.press('up')
+                    time.sleep(1)
+                    
         
 
 class DQN:
@@ -209,7 +268,6 @@ class DQN:
         # Initialize the replay memory
         self.replay_memory = deque(maxlen=REPLAY_MEMORY_SIZE)
 
-        # ????
         self.target_update_counter = 0
 
     def create_model(self, input_shape, action_shape):
@@ -352,15 +410,20 @@ env = Environment(objrecognition, movement_controller)
 print('building DQN Agent')
 agent = DQN()
 
-saved_weights_path = ""
+saved_weights_path = "C:\Python311\Scripts\cuphead_ai\weights\weights_20_2023-05-06_15-27-26.h5"
 
-#agent.load_weights(saved_weights_path)
+agent.load_weights(saved_weights_path)
 
 
 print('starting episodes')
 for episode in range(EPISODES):
+    
+        
     movement_controller.clear_movement()
-    current_state = env.reset()
+    if episode == 0:
+        current_state = env.reset(True)
+    else:
+        current_state = env.reset(False)
     episode_reward = 0
     step = 1
     done = False
@@ -368,8 +431,7 @@ for episode in range(EPISODES):
     epsilon = max(EPSILON_END, EPSILON_START * (EPSILON_DECAY ** episode))
 
     while not done:
-
-        
+        pyautogui.keyDown('x')
         if np.random.random() < epsilon:
             action = np.random.randint(0, env.ACTION_SPACE_SIZE)
         else:
@@ -390,7 +452,7 @@ for episode in range(EPISODES):
 
         current_state = new_state
         step += 1
-
+    pyautogui.keyUp('x')
     movement_controller.clear_movement()
     print('TERMINAL STATE REACHED, ENDING EPISODE!!!')
     print('TERMINAL STATE REACHED, ENDING EPISODE!!!')
