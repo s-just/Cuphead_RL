@@ -152,10 +152,10 @@ class Environment:
 
     def check_terminal_state(self):
         if np.array_equal(self.player_position, np.array([-1, -1, -1, -1, -1])):
+            self.movement.clear_movement()
             screen = capture_screen('Cuphead')
             # If the player is dead, break the loop
             if is_player_dead(screen):
-                self.movement.clear_movement()
                 print("FOUND RETRY FOUND RETRY.")
                 return True
             else:
@@ -167,7 +167,6 @@ class Environment:
             screen = capture_screen('Cuphead')
             # If the player is dead, break the loop
             if is_player_dead(screen):
-                self.movement.clear_movement()
                 print("FOUND RETRY FOUND RETRY.")
                 return True
             else:
@@ -213,11 +212,6 @@ class DQN:
         # ????
         self.target_update_counter = 0
 
-    def load_weights(self, weights_path):
-        self.model.load_weights(weights_path)
-        self.target_model.load_weights(weights_path)
-        print(f"Weights loaded from {weights_path}")
-    
     def create_model(self, input_shape, action_shape):
         model = Sequential()
 
@@ -233,6 +227,12 @@ class DQN:
         model.compile(loss="mse", optimizer=Adam(learning_rate=0.001))
 
         return model
+
+    def load_weights(self, weights_path):
+        self.model.load_weights(weights_path)
+        self.target_model.load_weights(weights_path)
+        print(f"Weights loaded from {weights_path}")
+    
 
     def update_replay_memory(self, transition):
         self.replay_memory.append(transition)
@@ -352,7 +352,8 @@ env = Environment(objrecognition, movement_controller)
 print('building DQN Agent')
 agent = DQN()
 
-#saved_weights_path = ""
+saved_weights_path = ""
+
 #agent.load_weights(saved_weights_path)
 
 
