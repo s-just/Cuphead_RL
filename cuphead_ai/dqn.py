@@ -13,12 +13,13 @@ import pyautogui
 from datetime import datetime
 import pygetwindow as gw
 
+### Notes:
+### If I ever come back to this project I would like to reimplement obj recognition with higher accuracies for cuphead being hit and overlapped with the slime boss.
+### Also I would use my GPU for the DQN model so training could be improved.
+### Also the reward function could be improved to win with less powerful weapons.
 
-###
-### Need to add way to used capture screen rather just top left of monitor so there is no discrepency inpositions when running the model from a different screen position
-### Need to implement facing direction rather than just bullets between
-###
 
+# Capture the cuphead window for pressing retry without exiting to map.
 def capture_screen(window_title):
     window = gw.getWindowsWithTitle(window_title)[0]
     screenshot = pyautogui.screenshot(region=(window.left, window.top, window.width, window.height))
@@ -26,16 +27,15 @@ def capture_screen(window_title):
     screen = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
     return screen
 
+# Determines if the retry button is on the screen and is also highlighted.
 def is_player_dead(screen, threshold=0.8):
     retry_button = cv2.imread('retry_button.png')  # Removed cv2.IMREAD_GRAYSCALE
-    # Removed screen_gray conversion since we will work with color
-    
+    # Removed screen_gray conversion since we need the color for highlight detection
     result = cv2.matchTemplate(screen, retry_button, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, _ = cv2.minMaxLoc(result)
-    
     return max_val > threshold
 
-
+# The main Object Recognition class
 class ObjectRecognition():
     def __init__(self, model, bounding_box, show_results, conf_threshold):
         self.model = model
@@ -54,16 +54,18 @@ class ObjectRecognition():
         #print(results[0].boxes.boxes)
         return results[0].boxes.boxes
 
-
+# Basic DQN settings
 REPLAY_MEMORY_SIZE = 50_000
 MIN_REPLAY_MEMORY_SIZE = 500
 MINIBATCH_SIZE = 64
 DISCOUNT = 0.99
 TARGET_UPDATE_FREQ = 5
 
+# The environment that is being built from object recognition
 class Environment:
     def __init__(self, objrecognition, movement):
         self.player_position = None
+        self.player_facing = "right"
         self.boss_position = None
         self.objrecognition = objrecognition
         self.movement = movement
@@ -71,7 +73,7 @@ class Environment:
         self.boss_label = 2
         self.missile_label = 0
         self.ACTION_SPACE_SIZE = 3
-        self.current_missiles = []
+        self.current_missiles = [] # Originally I was tracking missiles but ended up changing my reward function
         
     def is_overlapping(self, objects):
         found_overlaps = []
@@ -100,24 +102,42 @@ class Environment:
             return True
         else:
             return False
-    
+
+    # Check if the player is facing the boss (important for reward system)
+    def is_player_facing_boss(self):
+        if self.player_facing == "right" and self.player_position[0] < self.boss_position[0]:
+            return True
+        elif self.player_facing == "left" and self.player_position[0] > self.boss_position[0]:
+            return True
+        else:
+            return False
+
     def step(self, action):
         if action == 0:  # Move Left
+            if (self.is_player_facing_boss()):
+                self.movement.clear_movement()
+                pyautogui.press('v')
             self.movement.move_left()
+            self.player_facing = "left"
         elif action == 1:  # Move Right
+            if (self.is_player_facing_boss()):
+                self.movement.clear_movement()
+                pyautogui.press('v')
             self.movement.move_right()
+            self.player_facing = "right"
         elif action == 2:  # Duck
             if (self.player_position is None) or (np.array_equal(self.player_position, np.array([-1, -1, -1, -1, -1]))):
                 self.movement.clear_movement()
             else:
                 self.movement.duck()
         
-        reward = self.reward()
+        reward = self.reward(action)
         new_state = self.get_state()
         done = self.check_terminal_state()
         
         return new_state, reward, done
 
+    # Grabs the state using the capture_state method and also handles situations where the player is not detected on screen (this is important as the shape to the DQN must be consistent).
     def get_state(self):
         self.capture_state()
         #print("player pos:", self.player_position)
@@ -134,7 +154,9 @@ class Environment:
             self.boss_position = np.array([-1, -1, -1, -1, -1])
             
         return np.concatenate([self.player_position, self.boss_position])
-    
+
+    # Capture the state using the object recognition class and only take the highest accuracy detections.
+    # This method also includes an implementation for reducing the size of the bounding boxes detected so that they can better represent the player and boss hitbox.
     def capture_state(self):
         obj_recognition_output = self.objrecognition.get_screen_data()
         #print("OR output:",obj_recognition_output)
@@ -145,9 +167,19 @@ class Environment:
 
         missiles = []
         
+        w_padding_percent = 0.03  # Padding percentage, adjust this value to change the padding size
+        h_padding_percent = 0.1
         # Loop through objects detected by the object recognition model
         for obj in obj_recognition_output:
             x, y, w, h, accuracy, label = obj.tolist()
+
+            # Apply padding to the bounding box
+            w_pad = int(w * w_padding_percent)
+            h_pad = int(h * h_padding_percent)
+            x += w_pad // 2
+            y += h_pad // 2
+            w -= w_pad
+            h -= h_pad
 
             # Update positions/accuracy for obj and find most accurate for ea label.
             if label == self.player_label:
@@ -162,12 +194,13 @@ class Environment:
                 if (accuracy > 0.5):
                     missiles.append(np.array([x, y, w, h, accuracy]))
         self.current_missiles = missiles
-                    
-         # Update the player and boss positions with the highest accuracy objects
+                
+        # Update the player and boss positions with the highest accuracy objects
         self.player_position = highest_accuracy_objdata[self.player_label]
         self.boss_position = highest_accuracy_objdata[self.boss_label]
 
 
+    # A method for checking if a single missile between the player and the boss,
     def is_missile_between(self, player, boss, missiles):
         for missile in missiles:
             if missile is None:
@@ -180,7 +213,7 @@ class Environment:
 
         return False
 
-        
+    # Check to see if thie boss is going to take damage from a missile that was previously fired.  (I stopped using this reward system)
     def check_for_boss_dmg(self):
         for missile in self.current_missiles:
             if self.is_missile_between(self.player_position, self.boss_position, self.current_missiles):
@@ -190,7 +223,8 @@ class Environment:
                 return True
         #print('not shooting boss')
         return False
-    
+
+    # Check to see if the retry option is visible, which determines if the episode should be terminated
     def check_terminal_state(self):
         if np.array_equal(self.player_position, np.array([-1, -1, -1, -1, -1])):
             self.movement.clear_movement()
@@ -217,22 +251,65 @@ class Environment:
             #print('returning False for done, player is on screen')
             return False
 
-    def reward(self):
+    # Checks if the player is going to be colliding with the boss. Helps with reward systems.
+    def is_agent_moving_towards_boss(self, action):
+        if action == 1:
+            if self.player_facing == "right":
+                if self.is_player_facing_boss():
+                    return True
+        if action == 0:
+            if self.player_facing == "left":
+                if self.is_player_facing_boss():
+                    return True
+        return False
+                
+    # The method for determing the agent's reward. Currently ensures Cuphead maintains an optimal distance from the boss and is not being hit by the boss.
+    def reward(self, action):
         damage_boss_bonus = 0
 
-        if (self.check_for_boss_dmg()):
-            damage_boss_bonus += 5
+        if (self.is_player_facing_boss()):
+            print('facing boss')
+            damage_boss_bonus += 1.5
         else:
-            damage_boss_bonus -= 2
-            
-        if self.is_overlapping([self.player_position, self.boss_position]):
-            return -25
-        else:
-            return 1 + damage_boss_bonus
+            print('not facing boss')
+            damage_boss_bonus -= 1
 
+        # Calculate distance between player and boss
+        player_center_x = self.player_position[0] + self.player_position[2] / 2
+        player_center_y = self.player_position[1] + self.player_position[3] / 2
+        boss_center_x = self.boss_position[0] + self.boss_position[2] / 2
+        boss_center_y = self.boss_position[1] + self.boss_position[3] / 2
+        distance = np.sqrt((player_center_x - boss_center_x) ** 2 + (player_center_y - boss_center_y) ** 2)
+        
+        # Define distance penalty based on the calculated distance
+        distance_penalty = 0
+        min_distance = 150  # Minimum desired distance between the player and boss
+        optimal_distance = 180  # Optimal desired distance between the player and boss
+
+        if distance < min_distance:
+            distance_penalty = -2 * (min_distance - distance) / min_distance
+
+        # Penalty for moving towards boss within optimal distance
+        moving_towards_boss_penalty = 0
+        if distance < optimal_distance and self.is_agent_moving_towards_boss(action):
+            print('moving towards boss within optimal distance')
+            moving_towards_boss_penalty = -10
+
+        print("moving towards boss penalty", moving_towards_boss_penalty)
+        print("distance from boss:", distance," / distance penalty:", distance_penalty)
+        
+        if self.is_overlapping([self.player_position, self.boss_position]):
+            print('TAKING DAMAGE FROM BOSS')
+            return -32
+        else:
+            print('not taking any dmg from boss')
+            return 3 + damage_boss_bonus + distance_penalty + moving_towards_boss_penalty
+
+    # Resets the environment by pressing the retry button and waiting for the battle to start. Also resets env variables and clears movement.
     def reset(self, ignore_check):
         self.movement.clear_movement()
         self.player_position = None
+        self.player_facing = "right"
         self.boss_position = None
         self.alive = True
         time.sleep(1.5)
@@ -240,7 +317,8 @@ class Environment:
         self.press_retry(ignore_check)
         time.sleep(1.5)
         return self.get_state()
-
+    
+    # Handles the act of pressing retry, which is necessary since sometimes agent movement can change the menu option unintentionally and the highlighted option needs to be adjusted.
     def press_retry(self, ignore_check):
         self.movement.clear_movement()
         self.movement.clear_movement()
@@ -261,7 +339,7 @@ class Environment:
                     time.sleep(1)
                     
         
-
+# The DQN used for the agent.
 class DQN:
     def __init__(self):
         # The model being used for fitting
@@ -341,12 +419,12 @@ class DQN:
         else:
             self.target_update_counter += 1
 
-
+# A class built using pyautogui, determines the movement statement and switches between them, holding down the correct key based on the state.
 class CupHeadMovement:
     def __init__(self):
         self.is_moving_left = False
         self.is_moving_right = False
-        self.is_moving_up = False
+        self.is_moving_up = False #Not utilized
         self.is_ducking = False
 
     # Used to reset the movement when switching between player directions
@@ -391,36 +469,39 @@ class CupHeadMovement:
     def retry_level(self):
         pyautogui.press('enter')
 
+# Initialize some hyperparameters and save variables
 WEIGHTS_SAVE_FREQ = 20
 WEIGHTS_SAVE_PATH = "weights/"
 EPISODES = 1000
-EPSILON_START = 1
+EPSILON_START = 0.02
 EPSILON_END = 0.01
-EPSILON_DECAY = 0.90
+EPSILON_DECAY = 0.99
 MIN_EPSILON =  0.01
-print('loading weights...')
+
+
 #Set current working directory and setup initialize obj rec
 HOME = os.getcwd()
 model = YOLO(f'{HOME}/weights/best.pt')
 
-print('done loading weights.')
+print('done loading objr weights.')
 
 print('building obj rec')
 objrecognition = ObjectRecognition(model, (0, 40, 640, 480), True, 0.2)
 
 print('building player controller')
 movement_controller = CupHeadMovement()
+
 print('building simulated env')
 env = Environment(objrecognition, movement_controller)
 
 print('building DQN Agent')
 agent = DQN()
 
-saved_weights_path = "C:\Python311\Scripts\cuphead_ai\weights\weights_20_2023-05-06_15-27-26.h5"
+#saved_weights_path = ""
 
-agent.load_weights(saved_weights_path)
+#agent.load_weights(saved_weights_path)
 
-
+# The training loop, uses epsilon to determine whether an action should be random or based on q values. The player is always firing.
 print('starting episodes')
 for episode in range(EPISODES):
     
@@ -439,8 +520,10 @@ for episode in range(EPISODES):
     while not done:
         pyautogui.keyDown('x')
         if np.random.random() < epsilon:
+            print('random action')
             action = np.random.randint(0, env.ACTION_SPACE_SIZE)
         else:
+            print('trained action')
             action = np.argmax(agent.get_qs(current_state, step))
 
         if (env.player_position is None):
@@ -458,13 +541,16 @@ for episode in range(EPISODES):
 
         current_state = new_state
         step += 1
+
     pyautogui.keyUp('x')
+    
     movement_controller.clear_movement()
     print('TERMINAL STATE REACHED, ENDING EPISODE!!!')
     print('TERMINAL STATE REACHED, ENDING EPISODE!!!')
     print('TERMINAL STATE REACHED, ENDING EPISODE!!!')
     print('Total reward was:', episode_reward)
-    
+
+    # Save weights based on the freq variable.
     if episode % WEIGHTS_SAVE_FREQ == 0:
         current_datetime = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         weights_filename = f"weights_{episode}_{current_datetime}.h5"
